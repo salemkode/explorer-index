@@ -145,7 +145,18 @@ const persistBlock = async (
 			})
 			.onConflictDoNothing();
 
-		const txRows = transactionsPage.map((item) => ({
+		const tokenTransactions = transactionsPage.filter((item) => {
+			const tx = item.transaction as any;
+			const hasTokenOutput = (tx.outputs || []).some(
+				(o: any) => o.token_category != null,
+			);
+			const hasTokenInput = (tx.inputs || []).some(
+				(i: any) => i.outpoint?.token_category != null,
+			);
+			return hasTokenOutput || hasTokenInput;
+		});
+
+		const txRows = tokenTransactions.map((item) => ({
 			txHash: item.transaction.hash,
 			blockHeight: toBigInt(block.height),
 			txIndex: item.transaction_index
@@ -157,8 +168,8 @@ const persistBlock = async (
 			await insertBatched(tx, transactions, txRows);
 		}
 
-		const outputsRows = transactionsPage.flatMap((item) =>
-			item.transaction.outputs.map((output) => ({
+		const outputsRows = tokenTransactions.flatMap((item) =>
+			item.transaction.outputs.map((output: any) => ({
 				txHash: item.transaction.hash,
 				outputIndex: Number.parseInt(output.output_index, 10),
 				blockHeight: toBigInt(block.height),
@@ -175,8 +186,8 @@ const persistBlock = async (
 			await insertBatched(tx, outputs, outputsRows);
 		}
 
-		const inputsRows = transactionsPage.flatMap((item) =>
-			item.transaction.inputs.map((input) => ({
+		const inputsRows = tokenTransactions.flatMap((item) =>
+			item.transaction.inputs.map((input: any) => ({
 				txHash: item.transaction.hash,
 				inputIndex: Number.parseInt(input.input_index, 10),
 				blockHeight: toBigInt(block.height),
