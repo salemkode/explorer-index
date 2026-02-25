@@ -1,1 +1,0 @@
-ALTER TABLE "inputs" ALTER COLUMN "prev_output_index" SET DATA TYPE bigint;

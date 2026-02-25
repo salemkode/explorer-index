@@ -1,5 +1,5 @@
 {
-  "id": "4a2ab605-89cf-4feb-b41b-6d54976f2558",
+  "id": "9187b273-5691-4849-941e-ca8581f2e292",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -262,7 +262,7 @@
         },
         "prev_output_index": {
           "name": "prev_output_index",
-          "type": "integer",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": true
         },
@@ -318,6 +318,77 @@
           "columns": [
             "tx_hash",
             "input_index"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.nft_balances": {
+      "name": "nft_balances",
+      "schema": "",
+      "columns": {
+        "token_category": {
+          "name": "token_category",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "locking_bytecode": {
+          "name": "locking_bytecode",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "nft_count": {
+          "name": "nft_count",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        }
+      },
+      "indexes": {
+        "nft_balances_token_category_idx": {
+          "name": "nft_balances_token_category_idx",
+          "columns": [
+            {
+              "expression": "token_category",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "nft_balances_locking_bytecode_idx": {
+          "name": "nft_balances_locking_bytecode_idx",
+          "columns": [
+            {
+              "expression": "locking_bytecode",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "nft_balances_token_category_locking_bytecode_pk": {
+          "name": "nft_balances_token_category_locking_bytecode_pk",
+          "columns": [
+            "token_category",
+            "locking_bytecode"
           ]
         }
       },
@@ -447,6 +518,77 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.token_balances": {
+      "name": "token_balances",
+      "schema": "",
+      "columns": {
+        "token_category": {
+          "name": "token_category",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "locking_bytecode": {
+          "name": "locking_bytecode",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "balance": {
+          "name": "balance",
+          "type": "numeric(38, 0)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        }
+      },
+      "indexes": {
+        "token_balances_token_category_idx": {
+          "name": "token_balances_token_category_idx",
+          "columns": [
+            {
+              "expression": "token_category",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "token_balances_locking_bytecode_idx": {
+          "name": "token_balances_locking_bytecode_idx",
+          "columns": [
+            {
+              "expression": "locking_bytecode",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "token_balances_token_category_locking_bytecode_pk": {
+          "name": "token_balances_token_category_locking_bytecode_pk",
+          "columns": [
+            "token_category",
+            "locking_bytecode"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.token_index_state": {
       "name": "token_index_state",
       "schema": "",
@@ -482,6 +624,311 @@
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.token_inputs": {
+      "name": "token_inputs",
+      "schema": "",
+      "columns": {
+        "tx_hash": {
+          "name": "tx_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "input_index": {
+          "name": "input_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "block_height": {
+          "name": "block_height",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prev_tx_hash": {
+          "name": "prev_tx_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prev_output_index": {
+          "name": "prev_output_index",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "locking_bytecode": {
+          "name": "locking_bytecode",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "token_category": {
+          "name": "token_category",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fungible_amount": {
+          "name": "fungible_amount",
+          "type": "numeric(38, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "nonfungible_capability": {
+          "name": "nonfungible_capability",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "nonfungible_commitment": {
+          "name": "nonfungible_commitment",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sequence_number": {
+          "name": "sequence_number",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "token_inputs_prev_outpoint_idx": {
+          "name": "token_inputs_prev_outpoint_idx",
+          "columns": [
+            {
+              "expression": "prev_tx_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "prev_output_index",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "token_inputs_block_height_idx": {
+          "name": "token_inputs_block_height_idx",
+          "columns": [
+            {
+              "expression": "block_height",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "token_inputs_tx_hash_input_index_pk": {
+          "name": "token_inputs_tx_hash_input_index_pk",
+          "columns": [
+            "tx_hash",
+            "input_index"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.token_outputs": {
+      "name": "token_outputs",
+      "schema": "",
+      "columns": {
+        "tx_hash": {
+          "name": "tx_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "output_index": {
+          "name": "output_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "block_height": {
+          "name": "block_height",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "locking_bytecode": {
+          "name": "locking_bytecode",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_category": {
+          "name": "token_category",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fungible_amount": {
+          "name": "fungible_amount",
+          "type": "numeric(38, 0)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "nonfungible_capability": {
+          "name": "nonfungible_capability",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "nonfungible_commitment": {
+          "name": "nonfungible_commitment",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "token_outputs_block_height_idx": {
+          "name": "token_outputs_block_height_idx",
+          "columns": [
+            {
+              "expression": "block_height",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "token_outputs_token_category_idx": {
+          "name": "token_outputs_token_category_idx",
+          "columns": [
+            {
+              "expression": "token_category",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "token_outputs_locking_bytecode_idx": {
+          "name": "token_outputs_locking_bytecode_idx",
+          "columns": [
+            {
+              "expression": "locking_bytecode",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "token_outputs_tx_hash_output_index_pk": {
+          "name": "token_outputs_tx_hash_output_index_pk",
+          "columns": [
+            "tx_hash",
+            "output_index"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.token_transactions": {
+      "name": "token_transactions",
+      "schema": "",
+      "columns": {
+        "tx_hash": {
+          "name": "tx_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "block_height": {
+          "name": "block_height",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tx_index": {
+          "name": "tx_index",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "block_timestamp": {
+          "name": "block_timestamp",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_coinbase": {
+          "name": "is_coinbase",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "token_transactions_block_height_idx": {
+          "name": "token_transactions_block_height_idx",
+          "columns": [
+            {
+              "expression": "block_height",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "token_transactions_tx_hash_pk": {
+          "name": "token_transactions_tx_hash_pk",
+          "columns": [
+            "tx_hash"
+          ]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},

@@ -40,10 +40,12 @@ export const GetBlockByHeight = graphql(`
         offset: $offsetTxs
         order_by: { transaction_index: asc }
         where: {
-          _or: [
-            { outputs: { token_category: { _is_null: false } } },
-            { inputs: { outpoint: { token_category: { _is_null: false } } } }
-          ]
+          transaction: {
+            _or: [
+              { outputs: { token_category: { _is_null: false } } },
+              { inputs: { outpoint: { token_category: { _is_null: false } } } }
+            ]
+          }
         }
       ) {
         transaction_index
