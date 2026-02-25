@@ -55,6 +55,13 @@ export const GetBlockByHeight = graphql(`
             sequence_number
             outpoint_index
             outpoint_transaction_hash
+            outpoint {
+              locking_bytecode
+              token_category
+              fungible_token_amount
+              nonfungible_token_capability
+              nonfungible_token_commitment
+            }
           }
           outputs {
             output_index

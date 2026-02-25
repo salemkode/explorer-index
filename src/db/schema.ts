@@ -63,6 +63,77 @@ export const transactions = pgTable(
 	}),
 );
 
+export const tokenTransactions = pgTable(
+	"token_transactions",
+	{
+		txHash: bytea("tx_hash").notNull(),
+		blockHeight: bigint("block_height", { mode: "bigint" }).notNull(),
+		txIndex: integer("tx_index"),
+		blockTimestamp: timestamp("block_timestamp", { withTimezone: true })
+			.notNull(),
+		isCoinbase: integer("is_coinbase"),
+	},
+	(table) => ({
+		pk: primaryKey({ columns: [table.txHash] }),
+		blockHeightIdx: index("token_transactions_block_height_idx").on(
+			table.blockHeight,
+		),
+	}),
+);
+
+export const tokenOutputs = pgTable(
+	"token_outputs",
+	{
+		txHash: bytea("tx_hash").notNull(),
+		outputIndex: integer("output_index").notNull(),
+		blockHeight: bigint("block_height", { mode: "bigint" }).notNull(),
+		lockingBytecode: bytea("locking_bytecode").notNull(),
+		tokenCategory: bytea("token_category").notNull(),
+		fungibleAmount: numeric("fungible_amount", { precision: 38, scale: 0 }),
+		nonfungibleCapability: text("nonfungible_capability"),
+		nonfungibleCommitment: bytea("nonfungible_commitment"),
+	},
+	(table) => ({
+		pk: primaryKey({ columns: [table.txHash, table.outputIndex] }),
+		blockHeightIdx: index("token_outputs_block_height_idx").on(
+			table.blockHeight,
+		),
+		tokenCategoryIdx: index("token_outputs_token_category_idx").on(
+			table.tokenCategory,
+		),
+		lockingBytecodeIdx: index("token_outputs_locking_bytecode_idx").on(
+			table.lockingBytecode,
+		),
+	}),
+);
+
+export const tokenInputs = pgTable(
+	"token_inputs",
+	{
+		txHash: bytea("tx_hash").notNull(),
+		inputIndex: integer("input_index").notNull(),
+		blockHeight: bigint("block_height", { mode: "bigint" }).notNull(),
+		prevTxHash: bytea("prev_tx_hash").notNull(),
+		prevOutputIndex: bigint("prev_output_index", { mode: "bigint" }).notNull(),
+		lockingBytecode: bytea("locking_bytecode"),
+		tokenCategory: bytea("token_category"),
+		fungibleAmount: numeric("fungible_amount", { precision: 38, scale: 0 }),
+		nonfungibleCapability: text("nonfungible_capability"),
+		nonfungibleCommitment: bytea("nonfungible_commitment"),
+		sequenceNumber: bigint("sequence_number", { mode: "bigint" }),
+	},
+	(table) => ({
+		pk: primaryKey({ columns: [table.txHash, table.inputIndex] }),
+		prevOutpointIdx: index("token_inputs_prev_outpoint_idx").on(
+			table.prevTxHash,
+			table.prevOutputIndex,
+		),
+		blockHeightIdx: index("token_inputs_block_height_idx").on(
+			table.blockHeight,
+		),
+	}),
+);
+
 export const outputs = pgTable(
 	"outputs",
 	{
@@ -145,6 +216,46 @@ export const holderBalances = pgTable(
 	},
 	(table) => ({
 		pk: primaryKey({ columns: [table.tokenCategory, table.lockingBytecode] }),
+	}),
+);
+
+export const tokenBalances = pgTable(
+	"token_balances",
+	{
+		tokenCategory: bytea("token_category").notNull(),
+		lockingBytecode: bytea("locking_bytecode").notNull(),
+		balance: numeric("balance", { precision: 38, scale: 0 })
+			.notNull()
+			.default("0"),
+	},
+	(table) => ({
+		pk: primaryKey({ columns: [table.tokenCategory, table.lockingBytecode] }),
+		tokenCategoryIdx: index("token_balances_token_category_idx").on(
+			table.tokenCategory,
+		),
+		lockingBytecodeIdx: index("token_balances_locking_bytecode_idx").on(
+			table.lockingBytecode,
+		),
+	}),
+);
+
+export const nftBalances = pgTable(
+	"nft_balances",
+	{
+		tokenCategory: bytea("token_category").notNull(),
+		lockingBytecode: bytea("locking_bytecode").notNull(),
+		nftCount: bigint("nft_count", { mode: "bigint" })
+			.notNull()
+			.default(sql`0`),
+	},
+	(table) => ({
+		pk: primaryKey({ columns: [table.tokenCategory, table.lockingBytecode] }),
+		tokenCategoryIdx: index("nft_balances_token_category_idx").on(
+			table.tokenCategory,
+		),
+		lockingBytecodeIdx: index("nft_balances_locking_bytecode_idx").on(
+			table.lockingBytecode,
+		),
 	}),
 );
 

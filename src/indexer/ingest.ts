@@ -1,12 +1,15 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import { env } from "../config/env";
 import { db } from "../db";
 import {
 	blocks,
 	indexedState,
-	inputs,
-	outputs,
-	transactions,
+	nftBalances,
+	tokenBalances,
+	tokenInputs,
+	tokenOutputs,
+	tokenTransactions,
+	tokenUtxos,
 } from "../db/schema";
 import { GetBlockByHeight, GetTipHeight } from "../graphql/queries/chaingraph";
 import type { ResultOf } from "../graphql";
@@ -15,6 +18,8 @@ import { fetchGraphQL } from "./chaingraph";
 const toBigInt = (value: string) => BigInt(value);
 const toOptionalBigInt = (value?: string | null) =>
 	value ? BigInt(value) : null;
+const toAmountBigInt = (value?: string | null) =>
+	value ? BigInt(value) : 0n;
 const toDateFromSeconds = (value: string) =>
 	new Date(Number.parseInt(value, 10) * 1000);
 const normalizeBytea = (value: unknown) => {
@@ -145,7 +150,7 @@ const persistBlock = async (
 			})
 			.onConflictDoNothing();
 
-		const tokenTransactions = transactionsPage.filter((item) => {
+		const tokenTxItems = transactionsPage.filter((item) => {
 			const tx = item.transaction as any;
 			const hasTokenOutput = (tx.outputs || []).some(
 				(o: any) => o.token_category != null,
@@ -156,49 +161,265 @@ const persistBlock = async (
 			return hasTokenOutput || hasTokenInput;
 		});
 
-		const txRows = tokenTransactions.map((item) => ({
+		const tokenTxRows = tokenTxItems.map((item) => ({
 			txHash: item.transaction.hash,
 			blockHeight: toBigInt(block.height),
 			txIndex: item.transaction_index
 				? Number.parseInt(item.transaction_index, 10)
 				: null,
+			blockTimestamp: toDateFromSeconds(block.timestamp),
+			isCoinbase: item.transaction.is_coinbase ? 1 : 0,
 		}));
 
-		if (txRows.length) {
-			await insertBatched(tx, transactions, txRows);
+		if (tokenTxRows.length) {
+			await insertBatched(tx, tokenTransactions, tokenTxRows);
 		}
 
-		const outputsRows = tokenTransactions.flatMap((item) =>
-			item.transaction.outputs.map((output: any) => ({
+		const tokenOutputsRows = tokenTxItems.flatMap((item) =>
+			(item.transaction.outputs || [])
+				.filter((output: any) => output.token_category != null)
+				.map((output: any) => ({
+					txHash: item.transaction.hash,
+					outputIndex: Number.parseInt(output.output_index, 10),
+					blockHeight: toBigInt(block.height),
+					lockingBytecode: output.locking_bytecode,
+					tokenCategory: output.token_category,
+					fungibleAmount: output.fungible_token_amount ?? null,
+					nonfungibleCapability: output.nonfungible_token_capability ?? null,
+					nonfungibleCommitment: output.nonfungible_token_commitment ?? null,
+				})),
+		);
+
+		if (tokenOutputsRows.length) {
+			await insertBatched(tx, tokenOutputs, tokenOutputsRows);
+			await insertBatched(tx, tokenUtxos, tokenOutputsRows);
+		}
+
+		const rawInputs = tokenTxItems.flatMap((item) =>
+			(item.transaction.inputs || []).map((input: any) => ({
+				input,
 				txHash: item.transaction.hash,
-				outputIndex: Number.parseInt(output.output_index, 10),
 				blockHeight: toBigInt(block.height),
-				valueSatoshis: toOptionalBigInt(output.value_satoshis),
-				lockingBytecode: output.locking_bytecode,
-				tokenCategory: output.token_category ?? null,
-				fungibleAmount: output.fungible_token_amount ?? null,
-				nonfungibleCapability: output.nonfungible_token_capability ?? null,
-				nonfungibleCommitment: output.nonfungible_token_commitment ?? null,
 			})),
 		);
 
-		if (outputsRows.length) {
-			await insertBatched(tx, outputs, outputsRows);
+		const missingOutpointInputs = rawInputs.filter(
+			(item) => item.input.outpoint?.token_category == null,
+		);
+
+		const outpointConditions = missingOutpointInputs.map((item) =>
+			and(
+				eq(tokenUtxos.txHash, item.input.outpoint_transaction_hash),
+				eq(
+					tokenUtxos.outputIndex,
+					Number.parseInt(item.input.outpoint_index, 10),
+				),
+			),
+		);
+
+		const resolvedOutpoints = outpointConditions.length
+			? await tx
+					.select()
+					.from(tokenUtxos)
+					.where(or(...outpointConditions))
+			: [];
+
+		const resolvedOutpointMap = new Map(
+			resolvedOutpoints.map((row) => [
+				`${row.txHash}:${row.outputIndex}`,
+				row,
+			]),
+		);
+
+		const fungibleDeltas = new Map<string, bigint>();
+		const nftDeltas = new Map<string, bigint>();
+
+		const addFungibleDelta = (
+			tokenCategory: string,
+			lockingBytecode: string,
+			delta: bigint,
+		) => {
+			if (!delta) return;
+			const key = `${tokenCategory}:${lockingBytecode}`;
+			fungibleDeltas.set(key, (fungibleDeltas.get(key) ?? 0n) + delta);
+		};
+
+		const addNftDelta = (
+			tokenCategory: string,
+			lockingBytecode: string,
+			delta: bigint,
+		) => {
+			if (!delta) return;
+			const key = `${tokenCategory}:${lockingBytecode}`;
+			nftDeltas.set(key, (nftDeltas.get(key) ?? 0n) + delta);
+		};
+
+		for (const output of tokenOutputsRows) {
+			if (output.fungibleAmount != null) {
+				addFungibleDelta(
+					output.tokenCategory,
+					output.lockingBytecode,
+					toAmountBigInt(output.fungibleAmount),
+				);
+			}
+			if (output.nonfungibleCapability != null) {
+				addNftDelta(output.tokenCategory, output.lockingBytecode, 1n);
+			}
 		}
 
-		const inputsRows = tokenTransactions.flatMap((item) =>
-			item.transaction.inputs.map((input: any) => ({
-				txHash: item.transaction.hash,
+		const tokenInputsRows = [] as Array<{
+			txHash: string;
+			inputIndex: number;
+			blockHeight: bigint;
+			prevTxHash: string;
+			prevOutputIndex: bigint;
+			lockingBytecode: string | null;
+			tokenCategory: string | null;
+			fungibleAmount: string | null;
+			nonfungibleCapability: string | null;
+			nonfungibleCommitment: string | null;
+			sequenceNumber: bigint | null;
+		}>;
+
+		const spentOutpoints = [] as Array<{
+			txHash: string;
+			outputIndex: number;
+		}>;
+
+		for (const { input, txHash, blockHeight } of rawInputs) {
+			const outpointIndex = Number.parseInt(input.outpoint_index, 10);
+			const outpointKey = `${input.outpoint_transaction_hash}:${outpointIndex}`;
+			const outpoint = input.outpoint?.token_category
+				? {
+					lockingBytecode: input.outpoint.locking_bytecode,
+					tokenCategory: input.outpoint.token_category,
+					fungibleAmount: input.outpoint.fungible_token_amount ?? null,
+					nonfungibleCapability:
+						input.outpoint.nonfungible_token_capability ?? null,
+					nonfungibleCommitment:
+						input.outpoint.nonfungible_token_commitment ?? null,
+				}
+				: resolvedOutpointMap.get(outpointKey)
+					? {
+							lockingBytecode:
+								resolvedOutpointMap.get(outpointKey)!.lockingBytecode,
+							tokenCategory:
+								resolvedOutpointMap.get(outpointKey)!.tokenCategory,
+							fungibleAmount:
+								resolvedOutpointMap.get(outpointKey)!.fungibleAmount ??
+								null,
+							nonfungibleCapability:
+								resolvedOutpointMap.get(outpointKey)!.nonfungibleCapability ??
+								null,
+							nonfungibleCommitment:
+								resolvedOutpointMap.get(outpointKey)!.nonfungibleCommitment ??
+								null,
+						}
+					: null;
+
+			if (!outpoint || outpoint.tokenCategory == null) {
+				continue;
+			}
+
+			tokenInputsRows.push({
+				txHash,
 				inputIndex: Number.parseInt(input.input_index, 10),
-				blockHeight: toBigInt(block.height),
+				blockHeight,
 				prevTxHash: input.outpoint_transaction_hash,
 				prevOutputIndex: toBigInt(input.outpoint_index),
+				lockingBytecode: outpoint.lockingBytecode,
+				tokenCategory: outpoint.tokenCategory,
+				fungibleAmount: outpoint.fungibleAmount,
+				nonfungibleCapability: outpoint.nonfungibleCapability,
+				nonfungibleCommitment: outpoint.nonfungibleCommitment,
 				sequenceNumber: toOptionalBigInt(input.sequence_number),
-			})),
-		);
+			});
 
-		if (inputsRows.length) {
-			await insertBatched(tx, inputs, inputsRows);
+			spentOutpoints.push({
+				txHash: input.outpoint_transaction_hash,
+				outputIndex: outpointIndex,
+			});
+
+			if (outpoint.fungibleAmount != null) {
+				addFungibleDelta(
+					outpoint.tokenCategory,
+					outpoint.lockingBytecode,
+					-toAmountBigInt(outpoint.fungibleAmount),
+				);
+			}
+			if (outpoint.nonfungibleCapability != null) {
+				addNftDelta(outpoint.tokenCategory, outpoint.lockingBytecode, -1n);
+			}
+		}
+
+		if (tokenInputsRows.length) {
+			await insertBatched(tx, tokenInputs, tokenInputsRows);
+		}
+
+		if (spentOutpoints.length) {
+			const deleteConditions = spentOutpoints.map((item) =>
+				and(
+					eq(tokenUtxos.txHash, item.txHash),
+					eq(tokenUtxos.outputIndex, item.outputIndex),
+				),
+			);
+			await tx.delete(tokenUtxos).where(or(...deleteConditions));
+		}
+
+		const tokenBalanceRows = Array.from(fungibleDeltas.entries())
+			.map(([key, delta]) => {
+				const [tokenCategory, lockingBytecode] = key.split(":");
+				if (!tokenCategory || !lockingBytecode) return null;
+				return {
+					tokenCategory,
+					lockingBytecode,
+					balance: delta.toString(),
+				};
+			})
+			.filter((row): row is {
+				tokenCategory: string;
+				lockingBytecode: string;
+				balance: string;
+			} => row != null);
+
+		if (tokenBalanceRows.length) {
+			await tx
+				.insert(tokenBalances)
+				.values(tokenBalanceRows)
+				.onConflictDoUpdate({
+					target: [tokenBalances.tokenCategory, tokenBalances.lockingBytecode],
+					set: {
+						balance: sql`${tokenBalances.balance} + excluded.balance`,
+					},
+				});
+		}
+
+		const nftBalanceRows = Array.from(nftDeltas.entries())
+			.map(([key, delta]) => {
+				const [tokenCategory, lockingBytecode] = key.split(":");
+				if (!tokenCategory || !lockingBytecode) return null;
+				return {
+					tokenCategory,
+					lockingBytecode,
+					nftCount: delta,
+				};
+			})
+			.filter((row): row is {
+				tokenCategory: string;
+				lockingBytecode: string;
+				nftCount: bigint;
+			} => row != null);
+
+		if (nftBalanceRows.length) {
+			await tx
+				.insert(nftBalances)
+				.values(nftBalanceRows)
+				.onConflictDoUpdate({
+					target: [nftBalances.tokenCategory, nftBalances.lockingBytecode],
+					set: {
+						nftCount: sql`${nftBalances.nftCount} + excluded.nft_count`,
+					},
+				});
 		}
 
 		await tx
