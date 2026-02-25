@@ -25,4 +25,5 @@ export const env = {
 	),
 	confirmations: numberWithDefault(Bun.env.CONFIRMATIONS, 6),
 	startHeight: numberWithDefault(Bun.env.START_HEIGHT, 792772),
+	ingestConcurrency: numberWithDefault(Bun.env.INGEST_CONCURRENCY, 10),
 };

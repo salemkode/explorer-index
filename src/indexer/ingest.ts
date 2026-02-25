@@ -30,6 +30,7 @@ const normalizeBytea = (value: unknown) => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const batchSize = 1000;
+const ingestConcurrency = Math.max(1, Math.floor(env.ingestConcurrency));
 
 const insertBatched = async <TRow>(
 	tx: any,
@@ -230,41 +231,51 @@ export const runIngestion = async () => {
 			continue;
 		}
 
-		const { block, transactions: blockTransactions } =
-			await fetchFullBlock(nextHeight);
+		const remainingBlocks = safeTip - nextHeight + 1n;
+		const maxBlocks = remainingBlocks > BigInt(Number.MAX_SAFE_INTEGER)
+			? ingestConcurrency
+			: Math.min(ingestConcurrency, Number(remainingBlocks));
+		const heights = Array.from({ length: maxBlocks }, (_, index) =>
+			nextHeight + BigInt(index),
+		);
 
-		if (
-			state.lastIndexedBlockHash &&
-			block.previous_block_hash !== state.lastIndexedBlockHash
-		) {
-			throw new Error(
-				`Chain mismatch at height ${nextHeight}: expected prev ${state.lastIndexedBlockHash}`,
+		const fetchedBlocks = await Promise.all(
+			heights.map((height) => fetchFullBlock(height)),
+		);
+
+		let expectedPrevHash = state.lastIndexedBlockHash;
+		for (const { block, transactions: blockTransactions } of fetchedBlocks) {
+			if (expectedPrevHash && block.previous_block_hash !== expectedPrevHash) {
+				throw new Error(
+					`Chain mismatch at height ${block.height}: expected prev ${expectedPrevHash}`,
+				);
+			}
+
+			await persistBlock(block, blockTransactions);
+
+			state = {
+				...state,
+				lastIndexedHeight: toBigInt(block.height),
+				lastIndexedBlockHash: normalizeBytea(block.hash),
+			};
+			expectedPrevHash = state.lastIndexedBlockHash;
+
+			console.log(
+				JSON.stringify({
+					msg: "indexer.block",
+					height: block.height,
+					hash: block.hash,
+					transactions: blockTransactions.length,
+					outputs: blockTransactions.reduce(
+						(total, item) => total + item.transaction.outputs.length,
+						0,
+					),
+					inputs: blockTransactions.reduce(
+						(total, item) => total + item.transaction.inputs.length,
+						0,
+					),
+				}),
 			);
 		}
-
-		await persistBlock(block, blockTransactions);
-
-		state = {
-			...state,
-			lastIndexedHeight: toBigInt(block.height),
-			lastIndexedBlockHash: normalizeBytea(block.hash),
-		};
-
-		console.log(
-			JSON.stringify({
-				msg: "indexer.block",
-				height: block.height,
-				hash: block.hash,
-				transactions: blockTransactions.length,
-				outputs: blockTransactions.reduce(
-					(total, item) => total + item.transaction.outputs.length,
-					0,
-				),
-				inputs: blockTransactions.reduce(
-					(total, item) => total + item.transaction.inputs.length,
-					0,
-				),
-			}),
-		);
 	}
 };
