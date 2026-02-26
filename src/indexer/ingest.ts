@@ -1,3 +1,10 @@
+import {
+	binToHex,
+	decodeTransaction,
+	hash256,
+	hexToBin,
+	swapEndianness,
+} from "@bitauth/libauth";
 import { and, desc, eq, or, sql } from "drizzle-orm";
 import { env } from "../config/env";
 import { db } from "../db";
@@ -11,17 +18,19 @@ import {
 	tokenTransactions,
 	tokenUtxos,
 } from "../db/schema";
-import { GetBlockByHeight, GetTipHeight } from "../graphql/queries/chaingraph";
-import type { ResultOf } from "../graphql";
-import { fetchGraphQL } from "./chaingraph";
+import {
+	fetchBlockHeaderHex,
+	fetchChainTip,
+	fetchTransactionHex,
+	fetchTransactionIdFromPosition,
+	getElectrumClient,
+} from "./electrum";
 
-const toBigInt = (value: string) => BigInt(value);
-const toOptionalBigInt = (value?: string | null) =>
-	value ? BigInt(value) : null;
-const toAmountBigInt = (value?: string | null) =>
-	value ? BigInt(value) : 0n;
-const toDateFromSeconds = (value: string) =>
-	new Date(Number.parseInt(value, 10) * 1000);
+const toBigInt = (value: string | number | bigint) => BigInt(value);
+const toOptionalBigInt = (value?: string | number | bigint | null) =>
+	value == null ? null : BigInt(value);
+const toAmountBigInt = (value?: string | number | bigint | null) =>
+	value == null ? 0n : BigInt(value);
 const normalizeBytea = (value: unknown) => {
 	if (!value) return null;
 	if (typeof value === "string") {
@@ -31,6 +40,14 @@ const normalizeBytea = (value: unknown) => {
 		return `\\x${Buffer.from(value).toString("hex")}`;
 	}
 	return String(value);
+};
+
+const toBytea = (value: string | Uint8Array | null | undefined) => {
+	if (!value) return null;
+	if (value instanceof Uint8Array) {
+		return `\\x${binToHex(value)}`;
+	}
+	return value.startsWith("\\x") ? value : `\\x${value}`;
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,7 +85,7 @@ const getOrInitState = async () => {
 	const inserted = await db
 		.insert(indexedState)
 		.values({
-			chain: env.chaingraphNetworkRegex,
+			chain: env.electrumNetwork,
 			confirmations: env.confirmations,
 			lastIndexedHeight: BigInt(env.startHeight - 1),
 		})
@@ -86,150 +103,175 @@ const getOrInitState = async () => {
 	};
 };
 
-type BlockByHeightResult = ResultOf<typeof GetBlockByHeight>;
-type BlockByHeight = BlockByHeightResult["block"][number];
-type BlockTransaction = NonNullable<BlockByHeight>["transactions"][number];
+type DecodedTransaction = Exclude<ReturnType<typeof decodeTransaction>, string>;
 
-const fetchFullBlock = async (height: bigint) => {
-	const pageSize = 500;
-	let offset = 0;
-	let block: BlockByHeight | null = null;
-	const transactionsCollected: BlockTransaction[] = [];
+type BlockTransaction = {
+	txHash: string;
+	txIndex: number;
+	transaction: DecodedTransaction;
+	isCoinbase: boolean;
+};
 
-	while (true) {
-		const response = await fetchGraphQL(GetBlockByHeight, {
-			network: env.chaingraphNetworkRegex,
-			height: height.toString(),
-			limitTxs: pageSize,
-			offsetTxs: offset,
-		});
+type BlockHeaderData = {
+	height: bigint;
+	hash: string;
+	previousBlockHash: string;
+	timestamp: Date;
+	transactionCount: number;
+	inputCount: number;
+	outputCount: number;
+};
 
-		const currentBlock = response.block.at(0);
-		if (!currentBlock) {
-			throw new Error(`Block not found at height ${height}`);
+const decodeBlockHeader = (headerHex: string) => {
+	const headerBin = hexToBin(headerHex);
+	if (headerBin.length !== 80) {
+		throw new Error("Electrum returned an invalid block header");
+	}
+	const view = new DataView(
+		headerBin.buffer,
+		headerBin.byteOffset,
+		headerBin.byteLength,
+	);
+	const timestamp = view.getUint32(68, true);
+	const previousBlockHash = swapEndianness(
+		binToHex(headerBin.slice(4, 36)),
+	);
+	const blockHash = swapEndianness(binToHex(hash256(headerBin)));
+	return { timestamp, blockHash, previousBlockHash };
+};
+
+const isCoinbaseInput = (input: DecodedTransaction["inputs"][number]) => {
+	const outpointHash = binToHex(input.outpointTransactionHash);
+	return outpointHash === "00".repeat(32) && input.outpointIndex === 0xffffffff;
+};
+
+const isOutOfRangeError = (error: Error) =>
+	/(out of range|tx_pos|position)/i.test(error.message);
+
+const fetchBlockTransactionIds = async (height: number) => {
+	const client = await getElectrumClient();
+	const txIds: string[] = [];
+
+	for (let position = 0; ; position += 1) {
+		const response = await fetchTransactionIdFromPosition(
+			client,
+			height,
+			position,
+		);
+		if (response instanceof Error) {
+			if (isOutOfRangeError(response)) {
+				break;
+			}
+			throw response;
 		}
 
-		if (!block) {
-			block = currentBlock;
-		}
-
-		const txPage = currentBlock.transactions ?? [];
-		transactionsCollected.push(...txPage);
-
-		if (txPage.length < pageSize) {
-			break;
-		}
-
-		offset += pageSize;
+		txIds.push(response);
 	}
 
-	return { block: block!, transactions: transactionsCollected };
+	return txIds;
+};
+
+const fetchFullBlock = async (height: bigint) => {
+	const client = await getElectrumClient();
+	const headerHex = await fetchBlockHeaderHex(client, Number(height));
+	const header = decodeBlockHeader(headerHex);
+	const txIds = await fetchBlockTransactionIds(Number(height));
+	const transactions: BlockTransaction[] = [];
+
+	for (const [txIndex, txId] of txIds.entries()) {
+		const txHex = await fetchTransactionHex(client, txId);
+		const decoded = decodeTransaction(hexToBin(txHex));
+		if (typeof decoded === "string") {
+			throw new Error(`Failed to decode transaction ${txId}: ${decoded}`);
+		}
+		const txHash = toBytea(txId);
+		if (!txHash) {
+			throw new Error(`Invalid transaction hash returned: ${txId}`);
+		}
+		const isCoinbase =
+			decoded.inputs.length === 1 && isCoinbaseInput(decoded.inputs[0]);
+		transactions.push({
+			txHash,
+			txIndex,
+			transaction: decoded,
+			isCoinbase,
+		});
+	}
+
+	const inputCount = transactions.reduce(
+		(total, item) => total + item.transaction.inputs.length,
+		0,
+	);
+	const outputCount = transactions.reduce(
+		(total, item) => total + item.transaction.outputs.length,
+		0,
+	);
+
+	const blockHash = toBytea(header.blockHash);
+	const previousBlockHash = toBytea(header.previousBlockHash);
+	if (!blockHash || !previousBlockHash) {
+		throw new Error("Failed to parse block hashes");
+	}
+
+	return {
+		block: {
+			height,
+			hash: blockHash,
+			previousBlockHash,
+			timestamp: new Date(header.timestamp * 1000),
+			transactionCount: transactions.length,
+			inputCount,
+			outputCount,
+		} satisfies BlockHeaderData,
+		transactions,
+	};
 };
 
 const persistBlock = async (
-	block: BlockByHeight,
-	transactionsPage: BlockTransaction[],
+	block: BlockHeaderData,
+	transactions: BlockTransaction[],
 ) => {
 	await db.transaction(async (tx) => {
 		await tx
 			.insert(blocks)
 			.values({
-				height: toBigInt(block.height),
+				height: block.height,
 				blockHash: block.hash,
-				previousBlockHash: block.previous_block_hash,
-				timestamp: toDateFromSeconds(block.timestamp),
-				transactionCount: block.transaction_count
-					? Number.parseInt(block.transaction_count, 10)
-					: null,
-				inputCount: block.input_count
-					? Number.parseInt(block.input_count, 10)
-					: null,
-				outputCount: block.output_count
-					? Number.parseInt(block.output_count, 10)
-					: null,
+				previousBlockHash: block.previousBlockHash,
+				timestamp: block.timestamp,
+				transactionCount: block.transactionCount,
+				inputCount: block.inputCount,
+				outputCount: block.outputCount,
 			})
 			.onConflictDoNothing();
 
-		const tokenTxItems = transactionsPage.filter((item) => {
-			const tx = item.transaction as any;
-			const hasTokenOutput = (tx.outputs || []).some(
-				(o: any) => o.token_category != null,
-			);
-			const hasTokenInput = (tx.inputs || []).some(
-				(i: any) => i.outpoint?.token_category != null,
-			);
-			return hasTokenOutput || hasTokenInput;
-		});
-
-		const tokenTxRows = tokenTxItems.map((item) => ({
-			txHash: item.transaction.hash,
-			blockHeight: toBigInt(block.height),
-			txIndex: item.transaction_index
-				? Number.parseInt(item.transaction_index, 10)
-				: null,
-			blockTimestamp: toDateFromSeconds(block.timestamp),
-			isCoinbase: item.transaction.is_coinbase ? 1 : 0,
-		}));
-
-		if (tokenTxRows.length) {
-			await insertBatched(tx, tokenTransactions, tokenTxRows);
-		}
-
-		const tokenOutputsRows = tokenTxItems.flatMap((item) =>
-			(item.transaction.outputs || [])
-				.filter((output: any) => output.token_category != null)
-				.map((output: any) => ({
-					txHash: item.transaction.hash,
-					outputIndex: Number.parseInt(output.output_index, 10),
-					blockHeight: toBigInt(block.height),
-					lockingBytecode: output.locking_bytecode,
-					tokenCategory: output.token_category,
-					fungibleAmount: output.fungible_token_amount ?? null,
-					nonfungibleCapability: output.nonfungible_token_capability ?? null,
-					nonfungibleCommitment: output.nonfungible_token_commitment ?? null,
-				})),
-		);
-
-		if (tokenOutputsRows.length) {
-			await insertBatched(tx, tokenOutputs, tokenOutputsRows);
-			await insertBatched(tx, tokenUtxos, tokenOutputsRows);
-		}
-
-		const rawInputs = tokenTxItems.flatMap((item) =>
-			(item.transaction.inputs || []).map((input: any) => ({
-				input,
-				txHash: item.transaction.hash,
-				blockHeight: toBigInt(block.height),
-			})),
-		);
-
-		const missingOutpointInputs = rawInputs.filter(
-			(item) => item.input.outpoint?.token_category == null,
-		);
-
-		const outpointConditions = missingOutpointInputs.map((item) =>
-			and(
-				eq(tokenUtxos.txHash, item.input.outpoint_transaction_hash),
-				eq(
-					tokenUtxos.outputIndex,
-					Number.parseInt(item.input.outpoint_index, 10),
-				),
-			),
-		);
-
-		const resolvedOutpoints = outpointConditions.length
-			? await tx
-					.select()
-					.from(tokenUtxos)
-					.where(or(...outpointConditions))
-			: [];
-
-		const resolvedOutpointMap = new Map(
-			resolvedOutpoints.map((row) => [
-				`${row.txHash}:${row.outputIndex}`,
-				row,
+		const transactionMeta = new Map(
+			transactions.map((item) => [
+				item.txHash,
+				{ txIndex: item.txIndex, isCoinbase: item.isCoinbase ? 1 : 0 },
 			]),
 		);
+
+		const tokenTxMap = new Map<string, { txIndex: number | null; isCoinbase: number }>();
+		const tokenOutputsRows = [] as Array<{
+			txHash: string;
+			outputIndex: number;
+			blockHeight: bigint;
+			lockingBytecode: string;
+			tokenCategory: string;
+			fungibleAmount: string | null;
+			nonfungibleCapability: string | null;
+			nonfungibleCommitment: string | null;
+		}>;
+		const rawInputs = [] as Array<{
+			txHash: string;
+			txIndex: number;
+			inputIndex: number;
+			blockHeight: bigint;
+			prevTxHash: string;
+			prevOutputIndex: number;
+			sequenceNumber: bigint | null;
+		}>;
 
 		const fungibleDeltas = new Map<string, bigint>();
 		const nftDeltas = new Map<string, bigint>();
@@ -254,18 +296,110 @@ const persistBlock = async (
 			nftDeltas.set(key, (nftDeltas.get(key) ?? 0n) + delta);
 		};
 
-		for (const output of tokenOutputsRows) {
-			if (output.fungibleAmount != null) {
+		for (const item of transactions) {
+			item.transaction.outputs.forEach(
+				(
+					output: DecodedTransaction["outputs"][number],
+					outputIndex: number,
+				) => {
+				if (!output.token) return;
+
+				const tokenCategory = toBytea(output.token.category);
+				const lockingBytecode = toBytea(output.lockingBytecode);
+				if (!tokenCategory || !lockingBytecode) {
+					return;
+				}
+
+				const meta = transactionMeta.get(item.txHash);
+				if (meta) {
+					tokenTxMap.set(item.txHash, meta);
+				}
+
+				tokenOutputsRows.push({
+					txHash: item.txHash,
+					outputIndex,
+					blockHeight: block.height,
+					lockingBytecode,
+					tokenCategory,
+					fungibleAmount:
+						output.token.amount === 0n
+							? null
+							: output.token.amount.toString(),
+					nonfungibleCapability: output.token.nft?.capability ?? null,
+					nonfungibleCommitment: output.token.nft?.commitment
+						? toBytea(output.token.nft.commitment)
+						: null,
+				});
+
 				addFungibleDelta(
-					output.tokenCategory,
-					output.lockingBytecode,
-					toAmountBigInt(output.fungibleAmount),
+					tokenCategory,
+					lockingBytecode,
+					output.token.amount,
 				);
-			}
-			if (output.nonfungibleCapability != null) {
-				addNftDelta(output.tokenCategory, output.lockingBytecode, 1n);
-			}
+				if (output.token.nft) {
+					addNftDelta(tokenCategory, lockingBytecode, 1n);
+				}
+			},
+			);
+
+			item.transaction.inputs.forEach(
+				(
+					input: DecodedTransaction["inputs"][number],
+					inputIndex: number,
+				) => {
+				const prevTxHash = toBytea(binToHex(input.outpointTransactionHash));
+				if (!prevTxHash) return;
+				rawInputs.push({
+					txHash: item.txHash,
+					txIndex: item.txIndex,
+					inputIndex,
+					blockHeight: block.height,
+					prevTxHash,
+					prevOutputIndex: input.outpointIndex,
+					sequenceNumber: toOptionalBigInt(input.sequenceNumber),
+				});
+			},
+			);
 		}
+
+		if (tokenOutputsRows.length) {
+			await insertBatched(tx, tokenOutputs, tokenOutputsRows);
+			await insertBatched(tx, tokenUtxos, tokenOutputsRows);
+		}
+
+		const resolvedOutpoints = [] as Array<{
+			txHash: string;
+			outputIndex: number;
+			lockingBytecode: string;
+			tokenCategory: string;
+			fungibleAmount: string | null;
+			nonfungibleCapability: string | null;
+			nonfungibleCommitment: string | null;
+		}>;
+
+		for (let i = 0; i < rawInputs.length; i += batchSize) {
+			const chunk = rawInputs.slice(i, i + batchSize);
+			const outpointConditions = chunk.map((item) =>
+				and(
+					eq(tokenUtxos.txHash, item.prevTxHash),
+					eq(tokenUtxos.outputIndex, item.prevOutputIndex),
+				),
+			);
+
+			if (!outpointConditions.length) continue;
+			const rows = await tx
+				.select()
+				.from(tokenUtxos)
+				.where(or(...outpointConditions));
+			resolvedOutpoints.push(...rows);
+		}
+
+		const resolvedOutpointMap = new Map(
+			resolvedOutpoints.map((row) => [
+				`${row.txHash}:${row.outputIndex}`,
+				row,
+			]),
+		);
 
 		const tokenInputsRows = [] as Array<{
 			txHash: string;
@@ -286,58 +420,35 @@ const persistBlock = async (
 			outputIndex: number;
 		}>;
 
-		for (const { input, txHash, blockHeight } of rawInputs) {
-			const outpointIndex = Number.parseInt(input.outpoint_index, 10);
-			const outpointKey = `${input.outpoint_transaction_hash}:${outpointIndex}`;
-			const outpoint = input.outpoint?.token_category
-				? {
-					lockingBytecode: input.outpoint.locking_bytecode,
-					tokenCategory: input.outpoint.token_category,
-					fungibleAmount: input.outpoint.fungible_token_amount ?? null,
-					nonfungibleCapability:
-						input.outpoint.nonfungible_token_capability ?? null,
-					nonfungibleCommitment:
-						input.outpoint.nonfungible_token_commitment ?? null,
-				}
-				: resolvedOutpointMap.get(outpointKey)
-					? {
-							lockingBytecode:
-								resolvedOutpointMap.get(outpointKey)!.lockingBytecode,
-							tokenCategory:
-								resolvedOutpointMap.get(outpointKey)!.tokenCategory,
-							fungibleAmount:
-								resolvedOutpointMap.get(outpointKey)!.fungibleAmount ??
-								null,
-							nonfungibleCapability:
-								resolvedOutpointMap.get(outpointKey)!.nonfungibleCapability ??
-								null,
-							nonfungibleCommitment:
-								resolvedOutpointMap.get(outpointKey)!.nonfungibleCommitment ??
-								null,
-						}
-					: null;
-
+		for (const input of rawInputs) {
+			const outpointKey = `${input.prevTxHash}:${input.prevOutputIndex}`;
+			const outpoint = resolvedOutpointMap.get(outpointKey);
 			if (!outpoint || outpoint.tokenCategory == null) {
 				continue;
 			}
 
+			const meta = transactionMeta.get(input.txHash);
+			if (meta) {
+				tokenTxMap.set(input.txHash, meta);
+			}
+
 			tokenInputsRows.push({
-				txHash,
-				inputIndex: Number.parseInt(input.input_index, 10),
-				blockHeight,
-				prevTxHash: input.outpoint_transaction_hash,
-				prevOutputIndex: toBigInt(input.outpoint_index),
+				txHash: input.txHash,
+				inputIndex: input.inputIndex,
+				blockHeight: input.blockHeight,
+				prevTxHash: input.prevTxHash,
+				prevOutputIndex: toBigInt(input.prevOutputIndex),
 				lockingBytecode: outpoint.lockingBytecode,
 				tokenCategory: outpoint.tokenCategory,
 				fungibleAmount: outpoint.fungibleAmount,
 				nonfungibleCapability: outpoint.nonfungibleCapability,
 				nonfungibleCommitment: outpoint.nonfungibleCommitment,
-				sequenceNumber: toOptionalBigInt(input.sequence_number),
+				sequenceNumber: input.sequenceNumber,
 			});
 
 			spentOutpoints.push({
-				txHash: input.outpoint_transaction_hash,
-				outputIndex: outpointIndex,
+				txHash: input.prevTxHash,
+				outputIndex: input.prevOutputIndex,
 			});
 
 			if (outpoint.fungibleAmount != null) {
@@ -352,12 +463,28 @@ const persistBlock = async (
 			}
 		}
 
+		const tokenTxRows = Array.from(tokenTxMap.entries()).map(
+			([txHash, meta]) => ({
+				txHash,
+				blockHeight: block.height,
+				txIndex: meta.txIndex,
+				blockTimestamp: block.timestamp,
+				isCoinbase: meta.isCoinbase,
+			}),
+		);
+
+		if (tokenTxRows.length) {
+			await insertBatched(tx, tokenTransactions, tokenTxRows);
+		}
+
 		if (tokenInputsRows.length) {
 			await insertBatched(tx, tokenInputs, tokenInputsRows);
 		}
 
-		if (spentOutpoints.length) {
-			const deleteConditions = spentOutpoints.map((item) =>
+		for (let i = 0; i < spentOutpoints.length; i += batchSize) {
+			const chunk = spentOutpoints.slice(i, i + batchSize);
+			if (!chunk.length) continue;
+			const deleteConditions = chunk.map((item) =>
 				and(
 					eq(tokenUtxos.txHash, item.txHash),
 					eq(tokenUtxos.outputIndex, item.outputIndex),
@@ -425,7 +552,7 @@ const persistBlock = async (
 		await tx
 			.update(indexedState)
 			.set({
-				lastIndexedHeight: toBigInt(block.height),
+				lastIndexedHeight: block.height,
 				lastIndexedBlockHash: block.hash,
 				updatedAt: new Date(),
 			})
@@ -434,19 +561,19 @@ const persistBlock = async (
 };
 
 export const runIngestion = async () => {
+	const client = await getElectrumClient();
 	let state = await getOrInitState();
+	console.log(
+		JSON.stringify({
+			msg: "indexer.start",
+			lastIndexedHeight: state.lastIndexedHeight.toString(),
+			lastIndexedBlockHash: state.lastIndexedBlockHash,
+		}),
+	);
 
 	while (true) {
-		const tip = await fetchGraphQL(GetTipHeight, {
-			network: env.chaingraphNetworkRegex,
-		});
-
-		const latestBlock = tip.block.at(0);
-		if (!latestBlock) {
-			throw new Error("Chaingraph returned no tip block");
-		}
-
-		const tipHeight = toBigInt(latestBlock.height);
+		const tip = await fetchChainTip(client);
+		const tipHeight = toBigInt(tip.height);
 		const safeTip = tipHeight - BigInt(env.confirmations);
 		const nextHeight = state.lastIndexedHeight + 1n;
 
@@ -477,7 +604,7 @@ export const runIngestion = async () => {
 
 		let expectedPrevHash = state.lastIndexedBlockHash;
 		for (const { block, transactions: blockTransactions } of fetchedBlocks) {
-			if (expectedPrevHash && block.previous_block_hash !== expectedPrevHash) {
+			if (expectedPrevHash && block.previousBlockHash !== expectedPrevHash) {
 				throw new Error(
 					`Chain mismatch at height ${block.height}: expected prev ${expectedPrevHash}`,
 				);
@@ -487,7 +614,7 @@ export const runIngestion = async () => {
 
 			state = {
 				...state,
-				lastIndexedHeight: toBigInt(block.height),
+				lastIndexedHeight: block.height,
 				lastIndexedBlockHash: normalizeBytea(block.hash),
 			};
 			expectedPrevHash = state.lastIndexedBlockHash;
@@ -495,17 +622,11 @@ export const runIngestion = async () => {
 			console.log(
 				JSON.stringify({
 					msg: "indexer.block",
-					height: block.height,
+					height: block.height.toString(),
 					hash: block.hash,
 					transactions: blockTransactions.length,
-					outputs: blockTransactions.reduce(
-						(total, item) => total + item.transaction.outputs.length,
-						0,
-					),
-					inputs: blockTransactions.reduce(
-						(total, item) => total + item.transaction.inputs.length,
-						0,
-					),
+					outputs: block.outputCount,
+					inputs: block.inputCount,
 				}),
 			);
 		}
