@@ -140,10 +140,13 @@ const decodeBlockHeader = (headerHex: string) => {
 	return { timestamp, blockHash, previousBlockHash };
 };
 
-const isCoinbaseInput = (input: DecodedTransaction["inputs"][number]) => {
-	const outpointHash = binToHex(input.outpointTransactionHash);
-	return outpointHash === "00".repeat(32) && input.outpointIndex === 0xffffffff;
-};
+const isZeroHash = (hash?: Uint8Array) =>
+	!!hash && hash.every((byte) => byte === 0);
+
+const isCoinbaseInput = (input?: DecodedTransaction["inputs"][number]) =>
+	!!input &&
+	isZeroHash(input.outpointTransactionHash) &&
+	input.outpointIndex === 0xffffffff;
 
 const isOutOfRangeError = (error: Error) =>
 	/(out of range|tx_pos|position)/i.test(error.message);
@@ -342,12 +345,15 @@ const persistBlock = async (
 			},
 			);
 
-			item.transaction.inputs.forEach(
-				(
-					input: DecodedTransaction["inputs"][number],
-					inputIndex: number,
-				) => {
-				const prevTxHash = toBytea(binToHex(input.outpointTransactionHash));
+		item.transaction.inputs.forEach(
+			(
+				input: DecodedTransaction["inputs"][number],
+				inputIndex: number,
+			) => {
+				if (isCoinbaseInput(input)) {
+					return;
+				}
+				const prevTxHash = toBytea(input.outpointTransactionHash);
 				if (!prevTxHash) return;
 				rawInputs.push({
 					txHash: item.txHash,
@@ -359,7 +365,7 @@ const persistBlock = async (
 					sequenceNumber: toOptionalBigInt(input.sequenceNumber),
 				});
 			},
-			);
+		);
 		}
 
 		if (tokenOutputsRows.length) {
