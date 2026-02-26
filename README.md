@@ -11,8 +11,12 @@ Create a `.env` with:
 
 ```env
 DATABASE_URL=postgresql://explorer:explorer@localhost:5432/explorer_index
-CHAINGRAPH_URL=https://your-chaingraph-url/graphql
-CHAINGRAPH_NETWORK_REGEX=mainnet
+ELECTRUM_HOST=your-electrum-host
+ELECTRUM_PORT=50004
+ELECTRUM_TLS=true
+ELECTRUM_NETWORK=mainnet
+ELECTRUM_TIMEOUT_MS=30000
+ELECTRUM_KEEP_ALIVE_MS=30000
 CONFIRMATIONS=6
 START_HEIGHT=792772
 ```
